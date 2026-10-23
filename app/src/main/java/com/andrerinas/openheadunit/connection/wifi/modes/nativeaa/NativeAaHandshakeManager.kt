@@ -210,6 +210,8 @@ class NativeAaHandshakeManager(
 
     private val settings = App.provide(context).settings
     private val commManager = App.provide(context).commManager
+    // Lit from the phone's request for credentials until its join is over. See JoinScreenWakePolicy.
+    private val joinScreenWake = JoinScreenWake(context)
     private var aaServerSocket: BluetoothServerSocket? = null
     private var hfpServerSocket: BluetoothServerSocket? = null
 
@@ -3058,6 +3060,9 @@ class NativeAaHandshakeManager(
                             launcher.triggerWifiDirectRefresh()
                             return
                         }
+                        // Before the credentials, so the screen is lit by the time the phone's DHCP
+                        // goes out: dark, this unit's WiFi can drop it, and the join then fails.
+                        joinScreenWake.begin(link, consecutiveJoinRefusals)
                         sendWifiSecurityResponse(
                             output, credSsid, credPsk, credBssid,
                             credentials?.identity ?: GroupIdentityStability.UNPROVEN
@@ -3101,6 +3106,7 @@ class NativeAaHandshakeManager(
                     }
                     WppAction.CompleteSuccess -> {
                         AppLog.i("NativeAA: WiFi session landed. Holding the Bluetooth channel for the session and answering the phone's pings, as a head unit does.")
+                        joinScreenWake.end(link, "the session landed")
                         holdingSince = SystemClock.elapsedRealtime()
                         lastHoldSummaryAt = holdingSince
                         // The attempt is over even though the channel is not: nothing may read a
@@ -3128,6 +3134,7 @@ class NativeAaHandshakeManager(
                     }
                     is WppAction.Fail -> {
                         AppLog.w("NativeAA: Handshake failed — ${action.reason}.")
+                        joinScreenWake.end(link, "the handshake failed")
                         if (action.joinRefused) ifOwner(link) { countJoinRefusal() }
                         // Measured against a current Gearhead: it joins with a WifiNetworkSpecifier,
                         // which matches SSID *and* BSSID under a full ff:ff:ff:ff:ff:ff mask, and
@@ -3513,6 +3520,8 @@ class NativeAaHandshakeManager(
             inbound.close()
             closePhoneLink(link)
             ConnectionArbiter.release(arbiterClaim, sessionFormed = commManager.isConnected)
+            // Whatever ended this exchange, its join is over. A no-op if a successor holds it.
+            joinScreenWake.end(link, "the Bluetooth handshake link closed")
             AppLog.i("NativeAA: BT Handshake link closed.")
         }
     }
@@ -3878,6 +3887,7 @@ class NativeAaHandshakeManager(
         activeHandshakeJob?.cancel()
         activeHandshakeJob = null
         activeHandshakeLink = null
+        joinScreenWake.end(null, "the handshake servers stopped")
         // Only the per-attempt count resets: everAcceptedAaConnection is deliberately kept, so a
         // unit that has connected before is not warned just because the manager was re-armed.
         pokesSinceLastAccept = 0
